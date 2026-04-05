@@ -26,7 +26,23 @@ def clean_filename(first, last):
     return name.strip('_')
 
 if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+    def load_csv(file):
+    encodings = ["utf-8", "latin1", "cp1252"]
+    separators = [",", ";"]
+
+    for enc in encodings:
+        for sep in separators:
+            try:
+                file.seek(0)
+                df = pd.read_csv(file, encoding=enc, sep=sep)
+                if len(df.columns) > 1:
+                    return df
+            except:
+                continue
+
+    raise ValueError("Unable to read CSV. Please check file format.")
+
+df = load_csv(uploaded_file)
 
     memory_zip = BytesIO()
     used_names = {}
