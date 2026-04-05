@@ -13,20 +13,9 @@ st.title("📦 CSV → QR Codes (SVG) → ZIP")
 
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
-def clean_text(text):
-    if pd.isna(text):
-        return ""
-    text = unicodedata.normalize('NFKD', str(text))
-    text = text.encode('ascii', 'ignore').decode('ascii')
-    return text.strip()
 
-def clean_filename(first, last):
-    name = f"{first}_{last}".lower()
-    name = re.sub(r'[^a-z0-9]+', '_', name)
-    return name.strip('_')
-
-if uploaded_file:
-    def load_csv(file):
+# === ROBUST CSV LOADER ===
+def load_csv(file):
     encodings = ["utf-8", "latin1", "cp1252"]
     separators = [",", ";"]
 
@@ -40,9 +29,35 @@ if uploaded_file:
             except:
                 continue
 
-    raise ValueError("Unable to read CSV. Please check file format.")
+    raise ValueError("❌ Unable to read CSV. Please check file format.")
 
-df = load_csv(uploaded_file)
+
+# === CLEAN TEXT ===
+def clean_text(text):
+    if pd.isna(text):
+        return ""
+    text = unicodedata.normalize('NFKD', str(text))
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    return text.strip()
+
+
+# === CLEAN FILENAME ===
+def clean_filename(first, last):
+    name = f"{first}_{last}".lower()
+    name = re.sub(r'[^a-z0-9]+', '_', name)
+    return name.strip('_')
+
+
+# === MAIN PROCESS ===
+if uploaded_file:
+    try:
+        df = load_csv(uploaded_file)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    # Debug: show detected columns
+    st.write("📋 Detected columns:", list(df.columns))
 
     memory_zip = BytesIO()
     used_names = {}
@@ -55,15 +70,18 @@ df = load_csv(uploaded_file)
             last = clean_text(row.get("Last Name", ""))
             url = str(row.get("QR codes", "")).strip()
 
+            # Skip invalid rows
             if not url or url.upper() == "N/A":
                 skipped += 1
                 continue
+
             if not first or not last:
                 skipped += 1
                 continue
 
             base_name = clean_filename(first, last)
 
+            # Handle duplicates
             if base_name in used_names:
                 used_names[base_name] += 1
                 filename = f"{base_name}_{used_names[base_name]}.svg"
@@ -71,15 +89,20 @@ df = load_csv(uploaded_file)
                 used_names[base_name] = 1
                 filename = f"{base_name}.svg"
 
-            factory = svg.SvgImage
-            img = qrcode.make(url, image_factory=factory, box_size=10)
+            try:
+                factory = svg.SvgImage
+                img = qrcode.make(url, image_factory=factory, box_size=10)
 
-            img_bytes = BytesIO()
-            img.save(img_bytes)
-            img_bytes.seek(0)
+                img_bytes = BytesIO()
+                img.save(img_bytes)
+                img_bytes.seek(0)
 
-            zf.writestr(filename, img_bytes.read())
-            generated += 1
+                zf.writestr(filename, img_bytes.read())
+                generated += 1
+
+            except Exception:
+                skipped += 1
+                continue
 
     memory_zip.seek(0)
 
