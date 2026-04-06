@@ -11,8 +11,9 @@ st.set_page_config(page_title="QR Code Generator", layout="centered")
 st.title("📦 CSV → QR Codes (SVG) → ZIP")
 
 
+# === ROBUST CSV LOADER ===
 def load_csv(file):
-    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
+    encodings = ["utf-8-sig", "utf-8", "mac_roman", "cp1252", "latin1"]
     separators = [",", ";"]
 
     for enc in encodings:
@@ -28,7 +29,8 @@ def load_csv(file):
                     str(x) for x in df.head(20).fillna("").astype(str).values.flatten()
                 )
 
-                suspicious_patterns = ["Ã", "Â", "�"]
+                # Reject obviously bad decodings
+                suspicious_patterns = ["Ã", "Â", "�", "\x8d", ""]
                 if any(p in sample_text for p in suspicious_patterns):
                     continue
 
@@ -40,14 +42,16 @@ def load_csv(file):
     raise ValueError("❌ Unable to read CSV correctly. Please check file encoding/export format.")
 
 
+# === NORMALIZE COLUMN NAMES FOR DETECTION ONLY ===
 def normalize_column(col):
-    col = unicodedata.normalize('NFKD', str(col))
-    col = col.encode('ascii', 'ignore').decode('ascii')
+    col = unicodedata.normalize("NFKD", str(col))
+    col = col.encode("ascii", "ignore").decode("ascii")
     col = col.lower()
-    col = re.sub(r'[^a-z0-9]', '', col)
+    col = re.sub(r"[^a-z0-9]", "", col)
     return col
 
 
+# === AUTO-DETECT COLUMNS ===
 def detect_columns(df):
     normalized = {normalize_column(c): c for c in df.columns}
 
@@ -66,17 +70,24 @@ def detect_columns(df):
     return first_col, last_col, url_col
 
 
+# === CLEAN TEXT (KEEP ACCENTS / SPECIAL CHARACTERS) ===
 def clean_text(text):
     if pd.isna(text):
         return ""
     return str(text).strip()
 
 
+# === CLEAN FILENAME (KEEP ACCENTS / CASE, REMOVE ONLY FORBIDDEN FILE CHARS) ===
 def clean_filename(first, last):
     name = f"{first}_{last}"
-    name = re.sub(r'[\\/*?:"<>|]', '', name)
-    name = re.sub(r'\s+', '_', name)
-    return name.strip('_')
+
+    # Remove only characters forbidden in filenames
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+
+    # Replace whitespace with underscores
+    name = re.sub(r"\s+", "_", name)
+
+    return name.strip("_")
 
 
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
@@ -98,7 +109,9 @@ if uploaded_file:
 
     st.success(f"✅ Columns detected → First: {first_col}, Last: {last_col}, URL: {url_col}")
 
+    # Debug checks
     st.write("Sample first names:", df[first_col].head(10).tolist())
+    st.write("Sample last names:", df[last_col].head(10).tolist())
 
     memory_zip = BytesIO()
     used_names = {}
@@ -133,6 +146,7 @@ if uploaded_file:
 
             base_name = clean_filename(first, last)
 
+            # Duplicate-safe filenames
             if base_name in used_names:
                 used_names[base_name] += 1
                 filename = f"{base_name}_{used_names[base_name]}.svg"
@@ -141,8 +155,6 @@ if uploaded_file:
                 filename = f"{base_name}.svg"
 
             try:
-                st.write("Generated filename:", filename)
-
                 factory = svg.SvgImage
                 img = qrcode.make(
                     url,
@@ -168,6 +180,7 @@ if uploaded_file:
                     "error": str(e)
                 })
 
+        # Add error report into ZIP if needed
         if error_rows:
             error_df = pd.DataFrame(error_rows)
             zf.writestr("error_report.csv", error_df.to_csv(index=False))
