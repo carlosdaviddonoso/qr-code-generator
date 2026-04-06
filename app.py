@@ -69,8 +69,8 @@ def clean_text(text):
 
 # === CLEAN FILENAME ===
 def clean_filename(first, last):
-    name = f"{first}_{last}".lower()
-    name = re.sub(r'[^a-z0-9]+', '_', name)
+    name = f"{first}_{last}"
+    name = re.sub(r'[^A-Za-z0-9]+', '_', name)
     return name.strip('_')
 
 
