@@ -62,19 +62,17 @@ def detect_columns(df):
 def clean_text(text):
     if pd.isna(text):
         return ""
-    text = unicodedata.normalize('NFKD', str(text))
-    text = text.encode('ascii', 'ignore').decode('ascii')
-    return text.strip()
+    return str(text).strip()
 
 
 # === CLEAN FILENAME ===
 def clean_filename(first, last):
     name = f"{first}_{last}"
 
-    # Remove only forbidden filesystem characters
+    # Remove only characters forbidden in filenames
     name = re.sub(r'[\\/*?:"<>|]', '', name)
 
-    # Replace multiple spaces with single underscore
+    # Replace spaces with underscores
     name = re.sub(r'\s+', '_', name)
 
     return name.strip('_')
