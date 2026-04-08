@@ -1,11 +1,13 @@
-import streamlit as st
-import pandas as pd
-import qrcode
+import math
 import re
 import unicodedata
 import zipfile
 from io import BytesIO
-from PIL import Image
+
+import pandas as pd
+import qrcode
+import streamlit as st
+from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="QR Code Generator", layout="centered")
 st.title("LinkedIn QR Code PNG Generator")
@@ -84,12 +86,53 @@ def clean_filename(first, last):
     return name.strip("_")
 
 
-# === GENERATE QR WITH CENTERED LINKEDIN LOGO ===
-def generate_qr_with_logo(url, logo_path="linkedin_logo.png"):
-    qr = qrcode.QRCode(
+# === CROP AWAY OUTER TRANSPARENT MARGINS FROM LOGO ===
+def trim_logo(img):
+    rgba = img.convert("RGBA")
+    bbox = rgba.getbbox()
+    if bbox:
+        rgba = rgba.crop(bbox)
+    return rgba
+
+
+# === CREATE ROUNDED WHITE BADGE ===
+def create_rounded_badge(size, radius):
+    badge = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    mask = Image.new("L", (size, size), 0)
+
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle(
+        [(0, 0), (size - 1, size - 1)],
+        radius=radius,
+        fill=255
+    )
+
+    white_fill = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+    badge = Image.composite(white_fill, badge, mask)
+    return badge
+
+
+# === GENERATE PRINT-READY QR WITH CENTERED LINKEDIN LOGO ===
+def generate_qr_with_logo(url, logo_path="linkedin_logo.png", dpi=300, print_size_in=1.25):
+    target_px = int(round(dpi * print_size_in))
+
+    # Probe QR size first to determine required box_size
+    qr_probe = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=10,
+        border=4,
+    )
+    qr_probe.add_data(url)
+    qr_probe.make(fit=True)
+
+    total_modules = qr_probe.modules_count + (qr_probe.border * 2)
+    box_size = max(1, math.ceil(target_px / total_modules))
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=box_size,
         border=4,
     )
     qr.add_data(url)
@@ -98,6 +141,7 @@ def generate_qr_with_logo(url, logo_path="linkedin_logo.png"):
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
 
     logo = Image.open(logo_path).convert("RGBA")
+    logo = trim_logo(logo)
 
     qr_width, qr_height = qr_img.size
 
@@ -105,10 +149,12 @@ def generate_qr_with_logo(url, logo_path="linkedin_logo.png"):
     logo_size = int(qr_width * 0.18)
     logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
 
-    # White badge behind logo
+    # Rounded white badge behind logo
     padding = int(logo_size * 0.16)
-    badge_size = logo_size + 2 * padding
-    badge = Image.new("RGBA", (badge_size, badge_size), "white")
+    badge_size = logo_size + (2 * padding)
+    badge_radius = int(badge_size * 0.22)
+
+    badge = create_rounded_badge(badge_size, badge_radius)
 
     badge_x = (qr_width - badge_size) // 2
     badge_y = (qr_height - badge_size) // 2
@@ -118,10 +164,34 @@ def generate_qr_with_logo(url, logo_path="linkedin_logo.png"):
     badge.paste(logo, (logo_x, logo_y), logo)
     qr_img.paste(badge, (badge_x, badge_y), badge)
 
-    return qr_img
+    return qr_img, dpi
 
 
 uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+
+st.subheader("Print settings")
+
+resolution_option = st.selectbox(
+    "Resolution",
+    ["Standard", "High", "Ultra"],
+    index=1
+)
+
+if resolution_option == "Standard":
+    dpi = 300
+elif resolution_option == "High":
+    dpi = 600
+else:
+    dpi = 900
+
+print_size_in = st.selectbox(
+    "Printed QR size",
+    [1.0, 1.25, 1.5],
+    index=1,
+    format_func=lambda x: f"{x:.2f} inches"
+)
+
+st.caption("Recommended for business cards: High (600 DPI) and 1.25 inches.")
 
 if uploaded_file:
     try:
@@ -180,10 +250,15 @@ if uploaded_file:
                 filename = f"{base_name}.png"
 
             try:
-                img = generate_qr_with_logo(url, "linkedin_logo.png")
+                img, img_dpi = generate_qr_with_logo(
+                    url,
+                    logo_path="linkedin_logo.png",
+                    dpi=dpi,
+                    print_size_in=print_size_in
+                )
 
                 img_bytes = BytesIO()
-                img.save(img_bytes, format="PNG")
+                img.save(img_bytes, format="PNG", dpi=(img_dpi, img_dpi))
                 img_bytes.seek(0)
 
                 zf.writestr(filename, img_bytes.read())
