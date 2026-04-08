@@ -1,14 +1,14 @@
 import streamlit as st
 import pandas as pd
 import qrcode
-import qrcode.image.svg as svg
 import re
 import unicodedata
 import zipfile
 from io import BytesIO
+from PIL import Image
 
 st.set_page_config(page_title="QR Code Generator", layout="centered")
-st.title("📦 CSV → QR Codes (SVG) → ZIP")
+st.title("LinkedIn QR Code PNG Generator")
 
 
 # === ROBUST CSV LOADER ===
@@ -29,7 +29,6 @@ def load_csv(file):
                     str(x) for x in df.head(20).fillna("").astype(str).values.flatten()
                 )
 
-                # Reject obviously bad decodings
                 suspicious_patterns = ["Ã", "Â", "�", "\x8d", ""]
                 if any(p in sample_text for p in suspicious_patterns):
                     continue
@@ -39,7 +38,7 @@ def load_csv(file):
             except Exception:
                 continue
 
-    raise ValueError("❌ Unable to read CSV correctly. Please check file encoding/export format.")
+    raise ValueError("Unable to read CSV correctly. Please check file encoding/export format.")
 
 
 # === NORMALIZE COLUMN NAMES FOR DETECTION ONLY ===
@@ -70,27 +69,59 @@ def detect_columns(df):
     return first_col, last_col, url_col
 
 
-# === CLEAN TEXT (KEEP ACCENTS / SPECIAL CHARACTERS) ===
+# === CLEAN TEXT ===
 def clean_text(text):
     if pd.isna(text):
         return ""
     return str(text).strip()
 
 
-# === CLEAN FILENAME (KEEP ACCENTS / CASE, REMOVE ONLY FORBIDDEN FILE CHARS) ===
+# === CLEAN FILENAME ===
 def clean_filename(first, last):
     name = f"{first}_{last}"
-
-    # Remove only characters forbidden in filenames
     name = re.sub(r'[\\/*?:"<>|]', "", name)
-
-    # Replace whitespace with underscores
     name = re.sub(r"\s+", "_", name)
-
     return name.strip("_")
 
 
-uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+# === GENERATE QR WITH CENTERED LINKEDIN LOGO ===
+def generate_qr_with_logo(url, logo_path="linkedin_logo.png"):
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
+
+    logo = Image.open(logo_path).convert("RGBA")
+
+    qr_width, qr_height = qr_img.size
+
+    # Keep logo small enough for reliable scanning
+    logo_size = int(qr_width * 0.18)
+    logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
+
+    # White badge behind logo
+    padding = int(logo_size * 0.16)
+    badge_size = logo_size + 2 * padding
+    badge = Image.new("RGBA", (badge_size, badge_size), "white")
+
+    badge_x = (qr_width - badge_size) // 2
+    badge_y = (qr_height - badge_size) // 2
+    logo_x = (badge_size - logo_size) // 2
+    logo_y = (badge_size - logo_size) // 2
+
+    badge.paste(logo, (logo_x, logo_y), logo)
+    qr_img.paste(badge, (badge_x, badge_y), badge)
+
+    return qr_img
+
+
+uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
 
 if uploaded_file:
     try:
@@ -99,19 +130,13 @@ if uploaded_file:
         st.error(str(e))
         st.stop()
 
-    st.write("📋 Detected columns:", list(df.columns))
-
     first_col, last_col, url_col = detect_columns(df)
 
     if not all([first_col, last_col, url_col]):
-        st.error("❌ Could not automatically detect required columns.")
+        st.error("Could not automatically detect required columns.")
         st.stop()
 
-    st.success(f"✅ Columns detected → First: {first_col}, Last: {last_col}, URL: {url_col}")
-
-    # Debug checks
-    st.write("Sample first names:", df[first_col].head(10).tolist())
-    st.write("Sample last names:", df[last_col].head(10).tolist())
+    st.success(f"Columns detected: First = {first_col}, Last = {last_col}, URL = {url_col}")
 
     memory_zip = BytesIO()
     used_names = {}
@@ -145,26 +170,20 @@ if uploaded_file:
                 continue
 
             base_name = clean_filename(first, last)
+            name_key = base_name.casefold()
 
-            # Duplicate-safe filenames
-            if base_name in used_names:
-                used_names[base_name] += 1
-                filename = f"{base_name}_{used_names[base_name]}.svg"
+            if name_key in used_names:
+                used_names[name_key] += 1
+                filename = f"{base_name}_{used_names[name_key]}.png"
             else:
-                used_names[base_name] = 1
-                filename = f"{base_name}.svg"
+                used_names[name_key] = 1
+                filename = f"{base_name}.png"
 
             try:
-                factory = svg.SvgImage
-                img = qrcode.make(
-                    url,
-                    image_factory=factory,
-                    box_size=10,
-                    border=4
-                )
+                img = generate_qr_with_logo(url, "linkedin_logo.png")
 
                 img_bytes = BytesIO()
-                img.save(img_bytes)
+                img.save(img_bytes, format="PNG")
                 img_bytes.seek(0)
 
                 zf.writestr(filename, img_bytes.read())
@@ -180,17 +199,16 @@ if uploaded_file:
                     "error": str(e)
                 })
 
-        # Add error report into ZIP if needed
         if error_rows:
             error_df = pd.DataFrame(error_rows)
             zf.writestr("error_report.csv", error_df.to_csv(index=False))
 
     memory_zip.seek(0)
 
-    st.success(f"✅ {generated} QR codes generated | ⏭️ {skipped} skipped")
+    st.success(f"{generated} QR codes generated | {skipped} skipped")
 
     st.download_button(
-        label="⬇️ Download ZIP",
+        label="Download ZIP",
         data=memory_zip,
         file_name="qr_codes.zip",
         mime="application/zip"
