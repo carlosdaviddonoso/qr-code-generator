@@ -3,14 +3,19 @@ import re
 import unicodedata
 import zipfile
 from io import BytesIO
+from urllib.parse import urlparse
 
 import pandas as pd
 import qrcode
 import streamlit as st
 from PIL import Image, ImageDraw
 
-st.set_page_config(page_title="QR Code Generator", layout="centered")
-st.title("LinkedIn QR Code PNG Generator")
+st.set_page_config(page_title="LinkedIn QR Code Generator", layout="centered")
+st.title("LinkedIn QR Code Generator")
+
+# Fixed high-resolution print-ready settings
+DEFAULT_DPI = 600
+DEFAULT_PRINT_SIZE_IN = 1.25
 
 
 # === ROBUST CSV LOADER ===
@@ -79,11 +84,72 @@ def clean_text(text):
 
 
 # === CLEAN FILENAME ===
-def clean_filename(first, last):
-    name = f"{first}_{last}"
+def clean_filename(*parts):
+    name = "_".join([str(part).strip() for part in parts if str(part).strip()])
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     name = re.sub(r"\s+", "_", name)
     return name.strip("_")
+
+
+# === BASIC LINKEDIN URL CHECK ===
+def is_valid_linkedin_url(url):
+    if not url:
+        return False
+    parsed = urlparse(url.strip())
+    hostname = parsed.netloc.lower()
+    return "linkedin.com" in hostname
+
+
+# === EXTRACT LINKEDIN HANDLE FROM URL ===
+def extract_linkedin_handle(url):
+    try:
+        parsed = urlparse(url.strip())
+        path = parsed.path.strip("/")
+
+        if not path:
+            return ""
+
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            return ""
+
+        # Typical LinkedIn profile formats:
+        # /in/handle
+        # /pub/handle/xx/yy/zz
+        if parts[0].lower() == "in" and len(parts) >= 2:
+            handle = parts[1]
+        elif parts[0].lower() == "pub" and len(parts) >= 2:
+            handle = parts[1]
+        else:
+            handle = parts[-1]
+
+        handle = handle.strip()
+        handle = re.sub(r"[?#].*$", "", handle)
+        handle = re.sub(r"\s+", "_", handle)
+        handle = re.sub(r'[\\/*?:"<>|]', "", handle)
+
+        return handle
+    except Exception:
+        return ""
+
+
+# === CHOOSE SINGLE FILE NAME ===
+def build_single_filename(url, first_name="", last_name=""):
+    first_name = clean_text(first_name)
+    last_name = clean_text(last_name)
+
+    if first_name and last_name:
+        filename_base = clean_filename(first_name, last_name)
+        if filename_base:
+            return f"{filename_base}.png"
+
+    handle = extract_linkedin_handle(url)
+    if handle:
+        filename_base = clean_filename(handle)
+        if filename_base:
+            return f"{filename_base}.png"
+
+    return "linkedin_qr.png"
 
 
 # === CROP AWAY OUTER TRANSPARENT MARGINS FROM LOGO ===
@@ -113,10 +179,14 @@ def create_rounded_badge(size, radius):
 
 
 # === GENERATE PRINT-READY QR WITH CENTERED LINKEDIN LOGO ===
-def generate_qr_with_logo(url, logo_path="linkedin_logo.png", dpi=300, print_size_in=1.25):
+def generate_qr_with_logo(
+    url,
+    logo_path="linkedin_logo.png",
+    dpi=DEFAULT_DPI,
+    print_size_in=DEFAULT_PRINT_SIZE_IN
+):
     target_px = int(round(dpi * print_size_in))
 
-    # Probe QR size first to determine required box_size
     qr_probe = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -145,11 +215,9 @@ def generate_qr_with_logo(url, logo_path="linkedin_logo.png", dpi=300, print_siz
 
     qr_width, qr_height = qr_img.size
 
-    # Keep logo small enough for reliable scanning
     logo_size = int(qr_width * 0.18)
     logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
 
-    # Rounded white badge behind logo
     padding = int(logo_size * 0.16)
     badge_size = logo_size + (2 * padding)
     badge_radius = int(badge_size * 0.22)
@@ -167,47 +235,18 @@ def generate_qr_with_logo(url, logo_path="linkedin_logo.png", dpi=300, print_siz
     return qr_img, dpi
 
 
-uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+# === SINGLE QR DOWNLOAD ===
+def build_single_qr_file(url):
+    img, img_dpi = generate_qr_with_logo(url)
 
-st.subheader("Print settings")
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="PNG", dpi=(img_dpi, img_dpi))
+    img_bytes.seek(0)
+    return img_bytes
 
-resolution_option = st.selectbox(
-    "Resolution",
-    ["Standard", "High", "Ultra"],
-    index=1
-)
 
-if resolution_option == "Standard":
-    dpi = 300
-elif resolution_option == "High":
-    dpi = 600
-else:
-    dpi = 900
-
-print_size_in = st.selectbox(
-    "Printed QR size",
-    [1.0, 1.25, 1.5],
-    index=1,
-    format_func=lambda x: f"{x:.2f} inches"
-)
-
-st.caption("Recommended for business cards: High (600 DPI) and 1.25 inches.")
-
-if uploaded_file:
-    try:
-        df = load_csv(uploaded_file)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
-    first_col, last_col, url_col = detect_columns(df)
-
-    if not all([first_col, last_col, url_col]):
-        st.error("Could not automatically detect required columns.")
-        st.stop()
-
-    st.success(f"Columns detected: First = {first_col}, Last = {last_col}, URL = {url_col}")
-
+# === BATCH QR ZIP DOWNLOAD ===
+def build_batch_zip(df, first_col, last_col, url_col):
     memory_zip = BytesIO()
     used_names = {}
     error_rows = []
@@ -227,6 +266,8 @@ if uploaded_file:
                 reason = "Missing or N/A URL"
             elif not first or not last:
                 reason = "Missing name"
+            elif not is_valid_linkedin_url(url):
+                reason = "Invalid LinkedIn URL"
 
             if reason:
                 skipped += 1
@@ -250,12 +291,7 @@ if uploaded_file:
                 filename = f"{base_name}.png"
 
             try:
-                img, img_dpi = generate_qr_with_logo(
-                    url,
-                    logo_path="linkedin_logo.png",
-                    dpi=dpi,
-                    print_size_in=print_size_in
-                )
+                img, img_dpi = generate_qr_with_logo(url)
 
                 img_bytes = BytesIO()
                 img.save(img_bytes, format="PNG", dpi=(img_dpi, img_dpi))
@@ -279,12 +315,70 @@ if uploaded_file:
             zf.writestr("error_report.csv", error_df.to_csv(index=False))
 
     memory_zip.seek(0)
+    return memory_zip, generated, skipped
 
-    st.success(f"{generated} QR codes generated | {skipped} skipped")
 
-    st.download_button(
-        label="Download ZIP",
-        data=memory_zip,
-        file_name="qr_codes.zip",
-        mime="application/zip"
-    )
+# === UI ===
+tab_single, tab_batch = st.tabs(["Single QR Code", "Batch from CSV"])
+
+with tab_single:
+    st.subheader("Generate one QR code")
+    single_url = st.text_input("Paste a LinkedIn profile URL")
+    single_first_name = st.text_input("First Name (optional)")
+    single_last_name = st.text_input("Last Name (optional)")
+
+    if single_url:
+        if not is_valid_linkedin_url(single_url):
+            st.error("Please enter a valid LinkedIn profile URL.")
+        else:
+            try:
+                single_file = build_single_qr_file(single_url)
+                output_filename = build_single_filename(
+                    single_url,
+                    first_name=single_first_name,
+                    last_name=single_last_name
+                )
+
+                st.success(f"QR code generated: {output_filename}")
+
+                st.download_button(
+                    label="Download PNG",
+                    data=single_file,
+                    file_name=output_filename,
+                    mime="image/png"
+                )
+            except Exception as e:
+                st.error(f"Could not generate QR code: {e}")
+
+with tab_batch:
+    st.subheader("Generate multiple QR codes from a CSV")
+    uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"], key="batch_csv")
+
+    if uploaded_file:
+        try:
+            df = load_csv(uploaded_file)
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+
+        first_col, last_col, url_col = detect_columns(df)
+
+        if not all([first_col, last_col, url_col]):
+            st.error("Could not automatically detect required columns.")
+            st.stop()
+
+        st.success(f"Columns detected: First = {first_col}, Last = {last_col}, URL = {url_col}")
+
+        try:
+            zip_file, generated, skipped = build_batch_zip(df, first_col, last_col, url_col)
+
+            st.success(f"{generated} QR codes generated | {skipped} skipped")
+
+            st.download_button(
+                label="Download ZIP",
+                data=zip_file,
+                file_name="qr_codes.zip",
+                mime="application/zip"
+            )
+        except Exception as e:
+            st.error(f"Could not generate batch QR codes: {e}")
